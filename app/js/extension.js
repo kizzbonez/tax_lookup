@@ -1,0 +1,329 @@
+// Initialize Zoho Extension
+let zApp = null;
+let organizationID = null;
+
+// Helper logging
+function log(msg) {
+    console.log(msg);
+    const logArea = document.getElementById('logArea');
+    logArea.style.display = 'block';
+    const div = document.createElement('div');
+    div.innerText = `> ${msg}`;
+    logArea.appendChild(div);
+    logArea.scrollTop = logArea.scrollHeight;
+}
+
+function setStatus(msg, type) {
+    const el = document.getElementById('statusMessage');
+    el.innerText = msg;
+    el.className = `status ${type}`; // info, success, error
+}
+
+window.onload = function () {
+    ZFAPPS.extension.init().then(function (App) {
+        zApp = App;
+        log("Extension Initialized");
+        
+        // Try to get organization ID from context if available, otherwise fetch from invoice
+        ZFAPPS.get('organization_id').then(function(res){
+            organizationID = res.organization_id;
+            log("Org ID: " + organizationID);
+        }).catch(err => console.log("Could not get Org ID directly", err));
+
+        document.getElementById('lookupBtn').addEventListener('click', runTaxLookup);
+    });
+};
+
+async function runTaxLookup() {
+    const btn = document.getElementById('lookupBtn');
+    btn.disabled = true;
+    setStatus("Fetching Invoice Data...", "info");
+    document.getElementById('logArea').innerHTML = ''; // Clear logs
+
+    try {
+        // 1. GET INVOICE DATA
+        const responseData = await ZFAPPS.get('invoice');
+        const invoiceDetails = responseData.invoice;
+  
+        if(!organizationID) {
+            organizationID = invoiceDetails.organization_id; 
+        }
+
+        // 2. EXTRACT CUSTOM FIELDS & STANDARD FIELDS
+        const customFieldMap = {};
+        if (invoiceDetails.custom_fields && invoiceDetails.custom_fields.length > 0) {
+            log(`Found ${invoiceDetails.custom_fields.length} Custom Fields`);
+            
+            // DEBUG: Log the first field structure to help debug
+            console.log("First CF Structure:", JSON.stringify(invoiceDetails.custom_fields[0]));
+
+            invoiceDetails.custom_fields.forEach(cf => {
+                // Try label, then placeholder, then api_name
+                // Trim logic to ensure safe matching
+                const label = (cf.label || cf.placeholder || cf.api_name || "").trim();
+                
+                // Some versions use 'value', some might use 'value_formatted' or just be empty if not committed
+                const val = (cf.value !== undefined && cf.value !== null) ? cf.value : "";
+                
+                customFieldMap[label] = val;
+                // Also store by API name just in case
+                if(cf.api_name) customFieldMap[cf.api_name] = val;
+                
+                // Log if we think it's one of our target fields
+                if(label.includes("Destination") || label.includes("Origin")) {
+                    log(`Field [${label}]: '${val}'`);
+                }
+            });
+        } else {
+             log("No Custom Fields found in Invoice Data");
+        }
+        
+        // Debug available keys
+        console.log("Available CF Keys: ", Object.keys(customFieldMap));
+        
+        // Helper to find value by variations (Label, Placeholder, API Name, Fuzzy Match)
+        const getValue = (searchKey) => {
+            // 1. Direct match (e.g. "Destination Zip")
+            if (customFieldMap[searchKey] !== undefined) return customFieldMap[searchKey];
+
+            // 2. Direct match with asterisk (e.g. "Destination Zip*")
+            if (customFieldMap[searchKey + "*"] !== undefined) return customFieldMap[searchKey + "*"];
+
+            // 3. API Name Fuzzy Match
+            // Convert "Destination Zip" -> "destination_zip"
+            // Look for keys ending in "_destination_zip" or equal to "destination_zip"
+            const normalized = searchKey.toLowerCase().replace(/ /g, '_');
+            const mapKeys = Object.keys(customFieldMap);
+            
+            for (const key of mapKeys) {
+                const lowerKey = key.toLowerCase();
+                // Check if key is exactly the normalized version or ends with "_normalizedVersion"
+                // e.g. "cf_destination_zip" ends with "_destination_zip" is false, but includes "destination_zip"
+                // e.g. "cf__com_yabd6a_destination_zip"
+                if (lowerKey === normalized || lowerKey.endsWith("_" + normalized) || lowerKey.includes(normalized)) {
+                    log(`Fuzzy match: '${searchKey}' mapped to '${key}'`);
+                    return customFieldMap[key];
+                }
+            }
+            
+            return "";
+        };
+
+        const destAddress = getValue("Destination Address");
+        const destCity = getValue("Destination City");
+        const destState = getValue("Destination State");
+        const destZip = getValue("Destination Zip");
+        const originState = getValue("Origin State");
+        const originZip = getValue("Origin Zip");
+        
+        // Log detected values for confirmation
+        log(`Dest Address: ${destAddress}`);
+        log(`Dest City: ${destCity}`);
+        log(`Dest State: ${destState}`);
+        log(`Dest Zip: ${destZip}`);
+        log(`Origin State: ${originState}`);
+        log(`Origin Zip: ${originZip}`);
+        
+        const subTotal = invoiceDetails.sub_total || 0;
+        const shipping = invoiceDetails.shipping_charge || 0;
+
+        // Validation
+        if (!destZip) {
+            ZFAPPS.invoke('SHOW_MESSAGE', { type: 'warning', content: 'Please enter Destination Zip' });
+            throw new Error("Destination Zip is missing.");
+        }
+
+        // 3. CALL EXTERNAL WEBHOOK
+        setStatus("Calling OnSite Storage Webhook (via API Config)...", "info");
+        
+        const payload = {
+            destination_address: destAddress,
+            destination_city: destCity,
+            destination_zip: destZip,
+            destination_state: destState,
+            origin_zip: originZip,
+            origin_state: originState,
+            order_subtotal: subTotal,
+            shipping_fee: shipping
+        };
+
+        let data = null;
+
+        try {
+            // Using ZFAPPS.request() style for API Configurations
+            // The key 'webhook' comes from your screenshot.
+            // If it fails, check if the key is actually 'ac__com_yabd6a_webhook' in the console details.
+            const options = {
+                api_configuration_key: 'ac__com_yabd6a_webhook', 
+                url: "https://auto.onsitestorage.com/webhook/99e8801d-e558-46a5-8fe4-ace0c749aa14",
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            };
+
+            log("Requesting via API Config: webhook");
+            const connResponse = await ZFAPPS.request(options);
+
+            log("Connection Response: " + JSON.stringify(connResponse));
+            
+            // ZFAPPS.request usually returns the body directly or wrapped in { data: ... }
+            let responseBody = connResponse.data || connResponse.body || connResponse;
+            
+            if (typeof responseBody === 'string') {
+                 try {
+                     responseBody = JSON.parse(responseBody);
+                 } catch(e) { /* keep as string */ }
+            }
+            
+            data = responseBody;
+
+        } catch (connErr) {
+            log("API Config Request Failed.");
+            console.error(connErr);
+            throw new Error("Failed to invoke API Config 'webhook'. Check console logs.");
+        }
+
+        if (!data) throw new Error("No data received from Webhook");
+
+        // 4. PARSE RESPONSE
+        let totalTaxRate = 0;
+        let jurisdiction = "";
+        let targetCode = "";
+
+        if (data.total_rate != null) {
+            totalTaxRate = parseFloat(data.total_rate);
+            jurisdiction = data.jurisdiction;
+            if (data.code != null) {
+                targetCode = data.code;
+            }
+        }
+
+        if (!jurisdiction) {
+             throw new Error("No jurisdiction returned from webhook.");
+        }
+        
+        log(`Jurisdiction: ${jurisdiction}`);
+
+        // Extract code if missing (Mirroring Deluge Logic)
+        if (!targetCode) {
+            if (jurisdiction.includes("_")) {
+                const parts = jurisdiction.split("_");
+                if (parts.length >= 2) {
+                    targetCode = parts[1];
+                }
+            }
+        }
+
+        if (!targetCode) {
+             throw new Error(`Could not parse Tax Code from jurisdiction: ${jurisdiction}`);
+        }
+        
+        log(`Target Code: ${targetCode}`);
+
+        // 5. FIND TAX BY CODE (Pagination)
+        setStatus(`Searching for Tax Code '${targetCode}'...`, "info");
+        const finalTaxId = await findTaxIdByCode(targetCode);
+
+        if (finalTaxId) {
+             log(`Found Tax ID: ${finalTaxId}`);
+             
+             // 6. UPDATE INVOICE
+             
+             const currentLineItems = invoiceDetails.line_items || [];
+             if(currentLineItems.length === 0) {
+                 log("No line items to update.");
+             }
+             
+             const newLineItems = currentLineItems.map(item => {
+                 let newItem = Object.assign({}, item); 
+                 newItem.tax_id = finalTaxId;
+                 return newItem;
+             });
+
+             // Apply Update
+             setStatus("Updating Invoice Line Items...", "info");
+             await ZFAPPS.set('invoice.line_items', newLineItems);
+             
+             setStatus(`Success! Applied Tax Code: ${targetCode}`, "success");
+             ZFAPPS.invoke('SHOW_MESSAGE', { type: 'success', content: `Tax updated to ${targetCode}` });
+
+        } else {
+             throw new Error(`Tax Code '${targetCode}' not found in Zoho Books settings.`);
+        }
+
+    } catch (e) {
+        console.error(e);
+        const errMsg = e.message || e;
+        setStatus("Error: " + errMsg, "error");
+        ZFAPPS.invoke('SHOW_MESSAGE', { type: 'error', content: errMsg });
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+async function findTaxIdByCode(targetCode) {
+    if (!zApp || !organizationID) {
+        log("Cannot search taxes: Missing App or OrgID");
+        return null;
+    }
+
+    let stopPaging = false;
+    for (let pageNum = 1; pageNum <= 30; pageNum++) {
+        if (stopPaging) break;
+        
+        log(`Searching Taxes Page ${pageNum}...`);
+        
+        let taxesList = [];
+        let hasMore = false;
+
+        try {
+            // We use the 'zbooks_connection' defined in manifest
+            const response = await zApp.connection.invoke('zbooks_connection', {
+                url: `https://www.zohoapis.com/books/v3/settings/taxes?organization_id=${organizationID}&page=${pageNum}`,
+                method: 'GET'
+            });
+
+            // The SDK invoke response structure wraps the actual API body
+            const body = response.data ? response.data : 
+                        (typeof response.body === 'string' ? JSON.parse(response.body) : response.body);
+            
+            // Check for API errors in body
+            if(body.code !== 0 && body.code !== "0") {
+                log(`API Error: ${body.message}`);
+                 // Try to continue?
+            } else {
+                 taxesList = body.taxes || [];
+                 if (body.page_context) {
+                     hasMore = body.page_context.has_more_page;
+                 }
+            }
+
+        } catch (err) {
+            log("Connection invoke failed. Ensure 'zbooks_connection' is authorized.");
+            console.error(err);
+            // In a real scenario we might re-throw, but here we break.
+            break;
+        }
+
+        // Loop taxes in this page
+        for (let tax of taxesList) {
+            const taxName = tax.tax_name; // e.g., "Tax Name, Code"
+            if (taxName && taxName.includes(",")) {
+                const parts = taxName.split(",");
+                if (parts.length >= 2) {
+                    const existingCode = parts[1].trim(); 
+                    if (existingCode.includes(targetCode)) { // Deluge was doing `contains`
+                         log(`MATCH FOUND! Name: ${taxName} | ID: ${tax.tax_id}`);
+                         return tax.tax_id;
+                    }
+                }
+            }
+        }
+
+        if (!hasMore) {
+            stopPaging = true;
+        }
+    }
+
+    return null;
+}

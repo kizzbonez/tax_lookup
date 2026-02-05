@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Tax Lookup Widget</title>
+    <style>
+        body {
+            font-family: 'Open Sans', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+            padding: 15px;
+            font-size: 14px;
+        }
+        .btn {
+            display: inline-block;
+            background-color: #0091ff;
+            color: #fff;
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            width: 100%;
+            text-align: center;
+        }
+        .btn:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+        .status {
+            margin-top: 15px;
+            padding: 10px;
+            border-radius: 4px;
+            display: none;
+        }
+        .status.info { background-color: #e6f7ff; color: #0050b3; display: block; }
+        .status.success { background-color: #f6ffed; color: #389e0d; display: block; }
+        .status.error { background-color: #fff1f0; color: #cf1322; display: block; }
+        .log-area {
+            margin-top: 10px;
+            font-size: 11px;
+            color: #666;
+            max-height: 150px;
+            overflow-y: auto;
+            border: 1px solid #eee;
+            padding: 5px;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+
+    <h3 style="margin-top:0;">Tax Lookup 1.0</h3>
+    <p style="color:#666; margin-bottom: 15px;">
+        Click below to calculate and apply tax based on destination address.
+    </p>
+
+    <button id="lookupBtn" class="btn">Run Tax Lookup</button>
+
+    <div id="statusMessage" class="status"></div>
+    <div id="logArea" class="log-area"></div>
+
+    <!-- Zoho Finance SDK -->
+    <!-- Upgraded to v2.0 as required for API Configurations -->
+    <script src="https://js.zohostatic.com/zohofinance/v2.0/zf_sdk.js"></script>
+    
+    <!-- Extension Logic -->
+    <script src="js/extension.js"></script>
+</body>
+</html>

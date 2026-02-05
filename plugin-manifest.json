@@ -1,0 +1,24 @@
+{
+  "locale": [
+    "en"
+  ],
+  "service": "FINANCE",
+  "whiteListedDomains": [
+    "https://auto.onsitestorage.com"
+  ],
+  "modules": {
+    "widgets": [
+      {
+        "location": "invoice.creation.sidebar",
+        "name": "Finance Extension",
+        "url": "/app/widget.html",
+        "logo": "/app/img/logo.png"
+      }
+    ]
+  },
+  "whiteListedDomains": [
+    "https://auto.onsitestorage.com"
+  ],
+  "config": [],
+  "usedConnections": []
+}
