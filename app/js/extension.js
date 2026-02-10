@@ -1,6 +1,7 @@
 // Initialize Zoho Extension
 let zApp = null;
 let organizationID = null;
+let invoiceID = null;
 
 // Helper logging
 function log(msg) {
@@ -25,14 +26,54 @@ window.onload = function () {
         log("Extension Initialized");
         
         // Try to get organization ID from context if available, otherwise fetch from invoice
-        ZFAPPS.get('organization_id').then(function(res){
-            organizationID = res.organization_id;
+        
+        ZFAPPS.get('organization').then(function(res){
+            organizationID = res.organization.organization_id;
             log("Org ID: " + organizationID);
         }).catch(err => console.log("Could not get Org ID directly", err));
 
+        ZFAPPS.get('invoice').then(function(res){
+            invoiceID = res.invoice.invoice_id;
+            log("Invoice ID: " + invoiceID);
+        }).catch(err => console.log("Could not get Invoice ID directly", err));
+
         document.getElementById('lookupBtn').addEventListener('click', runTaxLookup);
+        document.getElementById('debugBtn').addEventListener('click', debugWebhook);
     });
 };
+
+async function debugWebhook() {
+    log("Starting Debug Webhook...");
+    const payload = {
+                "destination_address": "100 Cedar Lane",
+                "destination_city": "Calpine",
+                "destination_zip": "96124",
+                "destination_state": "CA",
+                "origin_zip": "75001",
+                "origin_state": "TX",
+                "order_subtotal": 100.00,
+                "shipping_fee": 15.00
+                };
+
+    try {
+     
+
+
+        let options = {
+            api_configuration_key :'ac__com_yabd6a_zohobook_taxes',
+            };
+            ZFAPPS.request(options).then(response => {
+            log("Connection Response: " + JSON.stringify(response));
+        }).catch(err => {
+            log("API Config Request Failed.");
+            console.error(err);
+        });
+
+    } catch (e) {
+        log("Debug Error: " + e.message);
+        console.error(e);
+    }
+}
 
 async function runTaxLookup() {
     const btn = document.getElementById('lookupBtn');
@@ -151,20 +192,20 @@ async function runTaxLookup() {
 
         try {
             // Using ZFAPPS.request() style for API Configurations
-            // The key 'webhook' comes from your screenshot.
-            // If it fails, check if the key is actually 'ac__com_yabd6a_webhook' in the console details.
             const options = {
-                api_configuration_key: 'ac__com_yabd6a_webhook', 
-                url: "https://auto.onsitestorage.com/webhook/99e8801d-e558-46a5-8fe4-ace0c749aa14",
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
+                api_configuration_key: 'ac__com_yabd6a_n8n_webhook',
+                body:{
+                    mode: 'raw',
+                    raw: JSON.stringify(payload)
+                }
             };
 
-            log("Requesting via API Config: webhook");
-            const connResponse = await ZFAPPS.request(options);
+            
 
-            log("Connection Response: " + JSON.stringify(connResponse));
+            log("Requesting via Connection: webhook");
+            // NOTE: We use ZFAPPS.request, but standard widgets usually expect 'connection_link_name' in options
+            // NOT 'api_configuration_key'.
+            const connResponse = await ZFAPPS.request(options);
             
             // ZFAPPS.request usually returns the body directly or wrapped in { data: ... }
             let responseBody = connResponse.data || connResponse.body || connResponse;
@@ -175,50 +216,17 @@ async function runTaxLookup() {
                  } catch(e) { /* keep as string */ }
             }
             
-            data = responseBody;
+            if(!responseBody) throw new Error("Unexpected response format from Webhook. Missing 'body' field.");
+            data = JSON.parse(responseBody.body)[0];
 
         } catch (connErr) {
             log("API Config Request Failed.");
-            console.error(connErr);
             throw new Error("Failed to invoke API Config 'webhook'. Check console logs.");
         }
 
         if (!data) throw new Error("No data received from Webhook");
 
-        // 4. PARSE RESPONSE
-        let totalTaxRate = 0;
-        let jurisdiction = "";
-        let targetCode = "";
-
-        if (data.total_rate != null) {
-            totalTaxRate = parseFloat(data.total_rate);
-            jurisdiction = data.jurisdiction;
-            if (data.code != null) {
-                targetCode = data.code;
-            }
-        }
-
-        if (!jurisdiction) {
-             throw new Error("No jurisdiction returned from webhook.");
-        }
-        
-        log(`Jurisdiction: ${jurisdiction}`);
-
-        // Extract code if missing (Mirroring Deluge Logic)
-        if (!targetCode) {
-            if (jurisdiction.includes("_")) {
-                const parts = jurisdiction.split("_");
-                if (parts.length >= 2) {
-                    targetCode = parts[1];
-                }
-            }
-        }
-
-        if (!targetCode) {
-             throw new Error(`Could not parse Tax Code from jurisdiction: ${jurisdiction}`);
-        }
-        
-        log(`Target Code: ${targetCode}`);
+        const targetCode = data.code;
 
         // 5. FIND TAX BY CODE (Pagination)
         setStatus(`Searching for Tax Code '${targetCode}'...`, "info");
@@ -274,23 +282,26 @@ async function findTaxIdByCode(targetCode) {
         log(`Searching Taxes Page ${pageNum}...`);
         
         let taxesList = [];
-        let hasMore = false;
+        let hasMore = false
 
         try {
-            // We use the 'zbooks_connection' defined in manifest
-            const response = await zApp.connection.invoke('zbooks_connection', {
-                url: `https://www.zohoapis.com/books/v3/settings/taxes?organization_id=${organizationID}&page=${pageNum}`,
-                method: 'GET'
-            });
+            // Using ZFAPPS.request (SDK v2) to call the connection
+    
 
-            // The SDK invoke response structure wraps the actual API body
-            const body = response.data ? response.data : 
-                        (typeof response.body === 'string' ? JSON.parse(response.body) : response.body);
+            const response = await  ZFAPPS.request({api_configuration_key : 'ac__com_yabd6a_zohobook_taxes'});
+
+           console.log("Tax API Response:", response);
+
+            // ZFAPPS.request returns { data: ..., status: ... } or the body directly
+            let body = response.data || response.body || response;
+            
+            if (typeof body === 'string') {
+                 try { body = JSON.parse(body); } catch(e) {}
+            }
             
             // Check for API errors in body
             if(body.code !== 0 && body.code !== "0") {
                 log(`API Error: ${body.message}`);
-                 // Try to continue?
             } else {
                  taxesList = body.taxes || [];
                  if (body.page_context) {
@@ -299,7 +310,6 @@ async function findTaxIdByCode(targetCode) {
             }
 
         } catch (err) {
-            log("Connection invoke failed. Ensure 'zbooks_connection' is authorized.");
             console.error(err);
             // In a real scenario we might re-throw, but here we break.
             break;

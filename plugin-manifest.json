@@ -16,9 +16,15 @@
       }
     ]
   },
-  "whiteListedDomains": [
-    "https://auto.onsitestorage.com"
-  ],
   "config": [],
-  "usedConnections": []
+  "usedConnections": [
+    {
+      "connectionLinkName": "webhook",
+      "connection_link_name": "webhook"
+    },
+    {
+      "connectionLinkName": "zbooks_connection",
+      "connection_link_name": "zbooks_connection"
+    }
+  ]
 }
