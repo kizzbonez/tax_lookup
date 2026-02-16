@@ -2,6 +2,17 @@
 let zApp = null;
 let organizationID = null;
 let invoiceID = null;
+let lastInvoiceDataStr = ""; // For change detection
+
+// Standard Debounce Function
+function debounce(func, wait) {
+    let timeout;
+    return function (...args) {
+        const context = this;
+        clearTimeout(timeout);
+        timeout = setTimeout(() => func.apply(context, args), wait);
+    };
+}
 
 // Helper logging
 function log(msg) {
@@ -30,12 +41,20 @@ window.onload = function () {
         ZFAPPS.get('organization').then(function(res){
             organizationID = res.organization.organization_id;
             log("Org ID: " + organizationID);
-        }).catch(err => console.log("Could not get Org ID directly", err));
+        }).catch(err => log("Info: Could not get Org ID directly (This is expected in some views)"));
 
         ZFAPPS.get('invoice').then(function(res){
             invoiceID = res.invoice.invoice_id;
             log("Invoice ID: " + invoiceID);
-        }).catch(err => console.log("Could not get Invoice ID directly", err));
+            
+            // Set initial state for polling
+            if (res && res.invoice) {
+                lastInvoiceDataStr = JSON.stringify(res.invoice);
+                initPolling();
+            }
+
+        }).catch(err => log("Info: Could not get Invoice ID directly (Run 'Debug' to test without invoice)"));
+
 
         document.getElementById('lookupBtn').addEventListener('click', runTaxLookup);
         document.getElementById('debugBtn').addEventListener('click', debugWebhook);
@@ -61,7 +80,8 @@ async function debugWebhook() {
 
         let options = {
             api_configuration_key :'ac__com_yabd6a_zohobook_taxes',
-            };
+            url_param: {orgID: organizationID}, // If your API Config expects URL params
+        };
             ZFAPPS.request(options).then(response => {
             log("Connection Response: " + JSON.stringify(response));
         }).catch(err => {
@@ -288,17 +308,24 @@ async function findTaxIdByCode(targetCode) {
             // Using ZFAPPS.request (SDK v2) to call the connection
     
 
-            const response = await  ZFAPPS.request({api_configuration_key : 'ac__com_yabd6a_zohobook_taxes'});
+    
 
-           console.log("Tax API Response:", response);
+        let options = {
+            api_configuration_key :'ac__com_yabd6a_zohobook_taxes',
+            url_param: {orgID: organizationID,pageIndex: pageNum}, // If your API Config expects URL params
+
+        };
+            const response =  await  ZFAPPS.request(options)
 
             // ZFAPPS.request returns { data: ..., status: ... } or the body directly
-            let body = response.data || response.body || response;
-            
-            if (typeof body === 'string') {
-                 try { body = JSON.parse(body); } catch(e) {}
+            let body = response.data ;
+             if(response.code !== 0 && response.code !== "0") {
+                log(`API Error: ${body.message}`);
+                break;
             }
-            
+            if (typeof body.body=== 'string') {
+                 try { body = JSON.parse(body.body); } catch(e) {       console.error(e);break;}
+            }
             // Check for API errors in body
             if(body.code !== 0 && body.code !== "0") {
                 log(`API Error: ${body.message}`);
@@ -336,4 +363,44 @@ async function findTaxIdByCode(targetCode) {
     }
 
     return null;
+}
+
+/* -------------------------------------------------------------------------
+   POLLING & DEBOUNCE LOGIC
+   Triggered by initPolling() in window.onload
+   ------------------------------------------------------------------------- */
+
+// Debounced Handler: Runs only after 1s of stability
+const handleInvoiceChange = debounce((currentInvoice) => {
+    log("Debounced Change Processed: Auto-Running Tax Lookup...");
+    runTaxLookup(); 
+}, 1000);
+
+function initPolling() {
+    log("Started polling for field changes (Interval: 2s)");
+    setInterval(async () => {
+        try {
+            // Fetch current state of the form
+            // NOTE: In some Zoho contexts, this might return saved data only.
+            // If the user hasn't saved, this might not reflect latest keystrokes.
+            const res = await ZFAPPS.get('invoice');
+            if(res && res.invoice) {
+                checkForChanges(res.invoice);
+            }
+        } catch(e) {
+            // Silent catch
+        }
+    }, 2000);
+}
+
+function checkForChanges(currentInvoice) {
+    const currentStr = JSON.stringify(currentInvoice);
+    
+    if (lastInvoiceDataStr && currentStr !== lastInvoiceDataStr) {
+        log("Change Detected!");
+        lastInvoiceDataStr = currentStr;
+        handleInvoiceChange(currentInvoice);
+    } else if (!lastInvoiceDataStr) {
+        lastInvoiceDataStr = currentStr;
+    }
 }
