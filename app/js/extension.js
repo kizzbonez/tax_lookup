@@ -3,6 +3,7 @@ let zApp = null;
 let organizationID = null;
 let invoiceID = null;
 let lastInvoiceDataStr = ""; // For change detection
+let expectedTaxId = null; // Stores the tax ID we determined should apply
 
 // Standard Debounce Function
 function debounce(func, wait) {
@@ -254,6 +255,7 @@ async function runTaxLookup() {
 
         if (finalTaxId) {
              log(`Found Tax ID: ${finalTaxId}`);
+             expectedTaxId = finalTaxId; // Store for consistency checks
              
              console.log(invoiceDetails.line_items);
              // Apply Update to Line Items individually
@@ -292,115 +294,6 @@ async function runTaxLookup() {
              ZFAPPS.invoke('SHOW_MESSAGE', { type: 'success', content: `Tax updated to ${targetCode} for ${updatedCount} items` });
 
         } else {
-             // This else corresponds to 'if (finalTaxId)' from way above (line ~260?)
-             // Wait, looking at context 'if (finalTaxId)' starts earlier.
-             // Line 258: if (finalTaxId) {
-             // So this block IS inside 'if (finalTaxId)'.
-             // The braces at 306 '} else {' must be closing 'if (finalTaxId)'.
-             // My previous edits might have messed up braces if I replaced 'if (finalTaxId)' content.
-             // Let's ensure I am closing 'if (finalTaxId)' correctly.
-             // The code below says '} else {' and throws tax not found. This is correct logic for (finalTaxId).
-             // Therefore the brace before it '}' must close 'if (finalTaxId)'.
-             // WAIT! That means my 'if (line_items)' inside must be closed.
-             
-             // In the previous mess:
-             // if (line_items) { ...
-             //    if (line_items) { ... }
-             // staus...
-             // } else { ... }
-             // That implies the brace before else closes 'if (finalTaxId)'?
-             // Yes. So 'if (line_items)' needs to be closed inside.
-             // My new string starts with 'if (line_items)'. It needs to close itself.
-             // BUT wait, look at my replacement string.
-             // It ends with 'ZFAPPS.invoke(...) \n\n } else {'
-             // The brace before 'else' is closing 'if (finalTaxId)'.
-             // That implies the 'if (line_items)' block must be closed BEFORE 'setStatus'.
-             
-             // Correct structure:
-             /*
-             if (finalTaxId) {
-                  // ...
-                  if (line_items) {
-                       // ...
-                  }
-                  setStatus(...)
-             } else {
-                  throw ...
-             }
-             */
-             
-             // My replacement string starts with 'if (line_items)'.
-             // It ends with '} else {'.
-             // This means I am replacing the chunk that INCLUDES the closing brace of 'if (finalTaxId)'.
-             // So, I need to make sure I close 'if (line_items)' properly inside.
-             
-             // Let's verify the `oldString` carefully.
-             // The `oldString` spans from line ~264 to ~306.
-             // It contains nested if checks in the bad version.
-             // The `newString` has just one 'if (line_items)'.
-             // And it ends with '} else {', which maintains the outer structure.
-             
-             // So:
-             // if (line_items) {
-             //    for ... { }
-             // } // Close line items
-             // setStatus...
-             // } else { // Close finalTaxId, open else
-             
-             // Wait, my newString above:
-             // if (line_items) { ... }
-             // setStatus...
-             // } else {
-             
-             // Wait, I am missing a brace for 'if (finalTaxId)' in my proposed newString!
-             // `if (line_items)` opens one brace.
-             // `for` opens loop.
-             // `try` ...
-             // `}` closes `try`.
-             // `}` closes `for`.
-             // `}` inside newString closes `if (line_items)`.
-             // Then `setStatus`.
-             // Then `} else {`.
-             // This last `}` closes... what?
-             // It must close `if (finalTaxId)`.
-             // But my `oldString` replaced everything inside `if (finalTaxId)`?
-             // No, read again.
-             // `oldString` starts at `if (invoiceDetails.line_items` (Line 264).
-             // It ends at `} else {` (Line 306).
-             // Does `if (invoiceDetails.line_items` contain `setStatus`?
-             // In the current file, yes, `setStatus` is AFTER the inner `if` but BEFORE `} else {`.
-             // So if I replace that whole block, I am fine.
-             
-             // BUT, look at the error `Unexpected token catch`.
-             // That was because of bad nesting in the file currently.
-             // My `oldString` needs to match the bad nesting exactly.
-             
-             // Current content (simplified):
-             // if (A) {
-             //    const ...
-             //    if (items) {
-             //       for ... { try {} catch {} }
-             //    }
-             //    setStatus...
-             // } else {
-             
-             // Wait, if (A) opens at 264.
-             // Inner if opens at 274.
-             // Inner if closes at 301.
-             // Outer if (A) closes... ?
-             // Line 306 has `} else {`. That closes `if (finalTaxId)`.
-             // Where does `if (A)` close? 
-             // It doesn't seem to close in the visible range!
-             // If `if (A)` never closes, then `} else {` at 306 is trying to be `else` for `if (A)`.
-             // But `if (A)` is inside `if (finalTaxId)`.
-             // So `if (finalTaxId)` is left open?
-             // This explains syntax errors.
-             
-             // I need to replace the whole block starting from `let updatedCount = 0;`
-             // to `} else {`.
-             // And ensure I close braces properly.
-             
-             // oldString will include the nested mess.
              throw new Error(`Tax Code '${targetCode}' not found in Zoho Books settings.`);
         }
 
@@ -505,16 +398,13 @@ function initPolling() {
     log("Started polling for field changes (Interval: 2s)");
     setInterval(async () => {
         try {
-            // Fetch current state of the form
-            // NOTE: In some Zoho contexts, this might return saved data only.
-            // If the user hasn't saved, this might not reflect latest keystrokes.
             const res = await ZFAPPS.get('invoice');
             if(res && res.invoice) {
                 checkForChanges(res.invoice);
+                // Also validate taxes on every poll
+                checkTaxConsistency(res.invoice);
             }
-        } catch(e) {
-            // Silent catch
-        }
+        } catch(e) { /* Silent catch */ }
     }, 2000);
 }
 
@@ -525,17 +415,12 @@ function checkForChanges(currentInvoice) {
     delete checkObj.line_items; 
     
     // Also ignore calculated totals that might change when we apply tax
-    // This ensures that setting tax id (or non-taxable) does not trigger another lookup
     delete checkObj.tax_total; 
     delete checkObj.total; 
     delete checkObj.sub_total; 
     delete checkObj.shipping_charge; 
     delete checkObj.adjustment;
     
-    // We strictly follow "do not trigger if there are changes on line item"
-    // So lookups only happen on main field (address, customer, custom fields) changes.
-    // Or manual button click.
-
     const currentStr = JSON.stringify(checkObj);
     
     if (lastInvoiceDataStr && currentStr !== lastInvoiceDataStr) {
@@ -544,5 +429,38 @@ function checkForChanges(currentInvoice) {
         handleInvoiceChange(currentInvoice); 
     } else if (!lastInvoiceDataStr) {
         lastInvoiceDataStr = currentStr;
+    }
+}
+
+function checkTaxConsistency(invoice) {
+    // Only check if we have performed a lookup and have an expected tax ID
+    if (!expectedTaxId) {
+        document.getElementById('warningArea').style.display = 'none';
+        return;
+    }
+    
+    const items = invoice.line_items || [];
+    let conflictFound = false;
+    
+    for (const item of items) {
+        // Compare tax_id (be careful with type strings vs numbers)
+        // If item doesn't have tax_id, it might be non-taxable or empty.
+        // Assuming strict match requirement: item.tax_id must equal expectedTaxId.
+        
+        // Also safeguard against null/undefined
+        const currentTaxId = item.tax_id ? String(item.tax_id) : "";
+        const expectedStr = String(expectedTaxId);
+        
+        if (currentTaxId !== expectedStr) {
+            conflictFound = true;
+            break;
+        }
+    }
+    
+    const warnEl = document.getElementById('warningArea');
+    if (conflictFound) {
+        warnEl.style.display = 'block';
+    } else {
+        warnEl.style.display = 'none';
     }
 }

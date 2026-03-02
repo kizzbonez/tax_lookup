@@ -57,6 +57,10 @@
     <button id="debugBtn" class="btn" style="margin-top:10px; background-color: #555;">Debug Webhook</button>
 
     <div id="statusMessage" class="status"></div>
+    <div id="warningArea" style="display:none; background-color:#fff2f0; border:1px solid #ffccc7; padding:10px; margin-top:10px; border-radius:4px;">
+        <strong style="color:#cf1322;">⚠️ Tax Mismatch Warning</strong>
+        <p style="margin:5px 0 0; color:#555; font-size:12px;">Some line items have tax codes that differ from the expected tax. Please verify before saving.</p>
+    </div>
     <div id="logArea" class="log-area"></div>
 
     <!-- Zoho Finance SDK -->
