@@ -63,6 +63,37 @@ window.onload = function () {
     });
 };
 
+async function fetchContactDetails(contactId) {
+    if (!contactId || !organizationID) return null;
+    
+    // Note: The API config key uses the ID from the user request
+    const options = {
+        api_configuration_key: 'ac__com_yabd6a_zoho_book_customer_contact',
+        url_param: { 
+            customerID: contactId,
+            orgID: organizationID 
+        }
+    };
+    
+    try {
+        const response = await ZFAPPS.request(options);
+        // ZFAPPS.request returns { data: ..., status: ... } or the body directly
+        let body = response.data || response.body; 
+        if (typeof body.body === 'string') {
+             try { body = JSON.parse(body.body); } catch(e) {}
+        }
+        
+        if (body.code === 0 || body.code === "0") {
+             return body.contact;
+        } else {
+             log(`Contact API Error: ${body.message}`);
+        }
+    } catch (e) {
+        log(`Error fetching contact details: ${e.message}`);
+    }
+    return null;
+}
+
 async function debugWebhook() {
     log("Starting Debug Webhook...");
     const payload = {
@@ -128,11 +159,42 @@ async function runTaxLookup() {
         // This implies overwrite on selection.
         
         const sourceAddress = invoiceDetails.shipping_address || invoiceDetails.billing_address;
+        console.log(invoiceDetails)
+        // --- CUSTOMER CHECK LOGIC FIX ---
+        // If customer ID changed from initial load OR last run.
+        // If lastCustomerId is null, it means first run.
+        // We should populate if fields are empty OR if customer just changed.
+        // However, user said "check customer is not working".
+        // Maybe it's not detecting the change properly if we rely on lastCustomerId.
         
-        if (sourceAddress && currentCustId && (currentCustId !== lastCustomerId)) {
-             log("Customer Change Detected: Attempting Address Autofill...");
+        const isNewCustomer = currentCustId && (currentCustId !== lastCustomerId);
+        console.log("Customer Check:", { currentCustId, lastCustomerId, isNewCustomer });
+        // Also check if we HAVE a source address to copy.
+        const canAutofill = sourceAddress && (Object.keys(sourceAddress).length > 0);
+        
+        console.log("Customer ID Check:", { currentCustId, lastCustomerId, isNewCustomer, canAutofill, sourceAddress });
+        if (isNewCustomer) {
+             let sourceAddress = null;
              
-             // Helper maps needed for finding index
+             log(`Customer Change Detected (${currentCustId}). Fetching details...`);
+             
+             // Fetch from API
+             const contactDetails = await fetchContactDetails(currentCustId);
+             
+             if (contactDetails) {
+                 // Prioritize Shipping Address, then Billing Address, then root address
+                 sourceAddress = contactDetails.shipping_address || contactDetails.billing_address || contactDetails;
+                 log("Fetched Contact Address from API successfully.");
+             } else {
+                 // Fallback to invoice object if API fails or returns no data
+                 sourceAddress = invoiceDetails.shipping_address || invoiceDetails.billing_address;
+                 log("API fetch failed/empty. Using Invoice Address fallback.");
+             }
+             
+             if (sourceAddress && Object.keys(sourceAddress).length > 0) {
+                 log("Attempting Address Autofill...");
+
+                 // Helper maps needed for finding index
              const findIndex = (searchKey) => {
                  if (!invoiceDetails.custom_fields) return -1;
                  const normalized = searchKey.toLowerCase().replace(/ /g, '_');
@@ -152,19 +214,51 @@ async function runTaxLookup() {
              const idxState = findIndex("Destination State");
              const idxZip = findIndex("Destination Zip");
              
-             // Prepare updates
              // Note: sourceAddress keys are usually lowercase in API (address, city, state, zip/zipcode)
              // Check keys carefully or check values
+             // Contact API Shipping Address structure (from screenshots): { address: "", city: "", state: "", zip: "", country: "", ... }
+             // Invoice object structure: { address: "...", city: "...", ... }
+             // They are compatible.
+
              const addrVal = sourceAddress.address || sourceAddress.street || "";
              const cityVal = sourceAddress.city || "";
-             const stateVal = sourceAddress.state || "";
+             
+             // Note: API returns 'state' or 'state_code'. Prefer code if available.
+             // Screenshot shows: "state_code": "CA", "state": "CA", "country": "U.S.A.".
+             
+             let stateVal = sourceAddress.state_code || sourceAddress.state || "";
+             
+             // Check if it's a full name in our mapping and convert to abbr if so.
+             if (window.ADDRESS_MAPPINGS) {
+                 // Try to find the exact state name (case-insensitive done by helper if needed, but simple map lookup first)
+                 const abbr = window.getAbbreviation ? window.getAbbreviation('states', stateVal) : stateVal;
+                 if (abbr) stateVal = abbr;
+             }
+
              const zipVal = sourceAddress.zip || sourceAddress.zipcode || "";
              
+             // Check for country if present and needed
+             // For now just focus on state as user requested "country and states"
+             let countryVal = sourceAddress.country_code || sourceAddress.country || "";
+             if (window.ADDRESS_MAPPINGS && countryVal) {
+                 const abbr = window.getAbbreviation ? window.getAbbreviation('countries', countryVal) : countryVal;
+                 if (abbr) countryVal = abbr;
+             }
+
              const updates = [];
              if (idxAddr >= 0) updates.push({ i: idxAddr, v: addrVal });
              if (idxCity >= 0) updates.push({ i: idxCity, v: cityVal });
              if (idxState >= 0) updates.push({ i: idxState, v: stateVal });
              if (idxZip >= 0) updates.push({ i: idxZip, v: zipVal });
+             
+             // If we want to support country, we need to find its index too.
+             // But user didn't explicitly ask to map country to a field, just mentioned country is full name.
+             // However, maybe destination country is relevant?
+             
+             // Also look for Country field
+             const idxCountry = findIndex("Destination Country");
+             
+             if (idxCountry >= 0) updates.push({ i: idxCountry, v: countryVal });
              
              if (updates.length > 0) {
                  log(`Autofilling ${updates.length} destination fields from Customer Address...`);
@@ -178,12 +272,20 @@ async function runTaxLookup() {
                      }
                  }
                  didUpdateAddress = true;
-                 setStatus("Autofilled Destination from Customer.", "success");
+                 setStatus("Autofilled Destination from Customer.", "info");
+             } else {
+                 log("Address found but no matching destination fields to fill.");
              }
+             } // Close sourceAddress block
+             
+             // Update tracker regardless of success to avoid loop
+             lastCustomerId = currentCustId;
+        } else if (currentCustId && !lastCustomerId) {
+             // Case: Initial Load with Customer already set.
+             // We might want to set lastCustomerId here to prevent loop if user clears fields?
+             // Or maybe we treat initial load as "processed".
+             lastCustomerId = currentCustId;
         }
-        
-        // Update tracker
-        if(currentCustId) lastCustomerId = currentCustId;
 
         // 2. EXTRACT CUSTOM FIELDS & STANDARD FIELDS
         const customFieldMap = {};
