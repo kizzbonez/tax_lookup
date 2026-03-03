@@ -321,37 +321,146 @@ async function runTaxLookup() {
 
         if (!data) throw new Error("No data received from Webhook");
 
-        const targetCode = data.code;
 
-        // 5. FIND TAX BY CODE (Pagination)
-        setStatus(`Searching for Tax Code '${targetCode}'...`, "info");
-        const finalTaxId = await findTaxIdByCode(targetCode);
+        const targetCode = data.code;
+        // Make sure jurisdiction is uppercase for consistency
+        const jurisdiction = data.jurisdiction ? data.jurisdiction.toUpperCase() : "";
+        const state = data.state ? data.state.toUpperCase() : "";
+
+        // Determine Mode: CA/Code vs Non-CA/Jurisdiction
+        // Condition: If code is present and not null/empty, use code.
+        const useCodeLookup = (targetCode && targetCode !== "null" && targetCode.trim() !== "");
+
+        setStatus(useCodeLookup ? `Searching for Tax Code '${targetCode}'...` : `Resolving Tax for ${jurisdiction}...`, "info");
+        
+        // Fetch All Taxes once
+        const allTaxes = await fetchAllTaxes();
+        let finalTaxId = null;
+        let appliedTaxName = "";
+        console.log("All Taxes Fetched: ", allTaxes);
+        if (useCodeLookup) {
+             log(`Processing as CA/Code-based Tax lookup (Code: ${targetCode})`);
+             // CA/Legacy Logic: Find matching code in tax name
+             for (const t of allTaxes) {
+                if (t.tax_name && t.tax_name.includes(",")) {
+                    const parts = t.tax_name.split(",");
+                    if (parts.length >= 2) {
+                        const existingCode = parts[1].trim(); 
+                        if (existingCode.includes(targetCode)) { 
+                             log(`MATCH FOUND! Name: ${t.tax_name} | ID: ${t.tax_id}`);
+                             finalTaxId = t.tax_id;
+                             appliedTaxName = t.tax_name;
+                             break;
+                        }
+                    }
+                }
+             }
+             
+             if (!finalTaxId) {
+                  throw new Error(`Tax Code '${targetCode}' not found in Zoho Books settings.`);
+             }
+
+        } else {
+             // Non-CA Logic
+             log(`Processing as Non-CA/Jurisdiction-based Tax lookup`);
+             
+             if (!jurisdiction) throw new Error("No Jurisdiction provided for Non-CA Tax calculation.");
+             
+             const totalRate = data.total_rate; 
+             // Group Name: <STATE>_<JURISDICTION>_<TOTAL_RATE>
+             const groupName = `${state}_${jurisdiction}_${totalRate}`;
+             appliedTaxName = groupName;
+
+             // Check if Group Exists
+             const existingGroup = allTaxes.find(t => t.tax_name === groupName);
+
+             if (existingGroup) {
+                  finalTaxId = existingGroup.tax_id;
+                  log(`Found existing Tax Group: ${groupName} (${finalTaxId})`);
+             } else {
+                  log(`Tax Group '${groupName}' not found. Creating components...`);
+                  
+                  // 1. Resolve Tax Authority
+                  // The webhook result supposedly contains 'tax_authority'.
+                  // If not, we might fall back to constructing one like "<STATE> Department of Revenue" or use default.
+                  const authName = data.tax_authority || `${state} ${jurisdiction} Tax Authority`;
+                  
+                  let authorityId = null;
+                  let authorityName = "";
+                  
+                  if (authName) {
+                      const existingAuth = await findTaxAuthorityByName(authName);
+                      if (existingAuth) {
+                          authorityId = existingAuth.tax_authority_id;
+                          authorityName = existingAuth.tax_authority_name;
+                          log(`Found Tax Authority: ${authorityName}`);
+                      } else {
+                          // Create
+                          const newAuth = await createTaxAuthority(authName);
+                          if (newAuth) {
+                              authorityId = newAuth.tax_authority_id;
+                              authorityName = newAuth.tax_authority_name;
+                              log(`Created Tax Authority: ${authorityName}`);
+                          }
+                      }
+                  }
+
+                  // 2. Component Logic
+                  const components = [];
+                  // We use raw rates (0.0625) for name and pass to creation (where it becomes percentage)
+                  if(data.state_rate > 0) components.push({ type: 'STATE_RATE', val: data.state_rate });
+                  if(data.county_rate > 0) components.push({ type: 'COUNTY_RATE', val: data.county_rate });
+                  if(data.city_rate > 0) components.push({ type: 'CITY_RATE', val: data.city_rate });
+                  if(data.special_rate > 0) components.push({ type: 'SPECIAL_RATE', val: data.special_rate });
+                  
+                  const componentIds = [];
+                  
+                  for (const comp of components) {
+                      // Name Format: <STATE>_<JURISDICTION>_<TYPE>_<value>
+                      const taxName = `${state}_${jurisdiction}_${comp.type}_${comp.val}`;
+                      
+                      // Check existence
+                      const existingTax = allTaxes.find(t => t.tax_name === taxName);
+                      if (existingTax) {
+                          log(`Using existing component: ${taxName}`);
+                          componentIds.push(existingTax.tax_id);
+                      } else {
+                          // Create
+                          // Pass authority if resolved
+                          const newId = await createTaxComponent(taxName, comp.val, authorityId, authorityName);
+                          componentIds.push(newId);
+                      }
+                  }
+                  
+                  // 3. Create Group
+                  if (componentIds.length > 0) {
+                      const newGroupId = await createTaxGroup(groupName, componentIds);
+                      if(newGroupId) {
+                          finalTaxId = newGroupId;
+                          // If it returns an object or ID, ensure we have the ID string
+                          if(typeof finalTaxId === 'object' && finalTaxId.tax_group_id) finalTaxId = finalTaxId.tax_group_id; 
+                          log(`Created new Tax Group: ${groupName} (${finalTaxId})`);
+                      }
+                  } else {
+                      log("No positive tax components found. Cannot create group.");
+                  }
+             }
+        }
+
 
         if (finalTaxId) {
-             log(`Found Tax ID: ${finalTaxId}`);
-             expectedTaxId = finalTaxId; // Store for consistency checks
+             log(`Found/Created Tax ID: ${finalTaxId}`);
+             expectedTaxId = finalTaxId; 
              
-             console.log(invoiceDetails.line_items);
-             // Apply Update to Line Items individually
              setStatus("Updating Invoice Line Items...", "info");
-             // await ZFAPPS.set('invoice.tax_id', finalTaxId) <-- Removed global set
 
              let updatedCount = 0;
              if (invoiceDetails.line_items && Array.isArray(invoiceDetails.line_items)) {
-                // Final Strategy: Iterative update per item index.
-                // Works around:
-                // 1. "Invalid Property" (sub-field access)
-                // 2. "Appended Duplicates" (bulk array set)
-                // 3. "Stuck" (full invoice set)
-                
                 for (let i = 0; i < invoiceDetails.line_items.length; i++) {
                      try {
-                         // Shallow copy item to avoid mutating original source immediately (though fine here)
                          const item = { ...invoiceDetails.line_items[i] };
                          item.tax_id = finalTaxId;
                          
-                         // Set the entire item object at the specific index
-                         // This forces replacement of the item at that index
                          ZFAPPS.set(`invoice.line_items[${i}]`, item).then(() => {
                              log(`Updated item ${i} with tax_id ${finalTaxId}`);
                          }).catch(err => {
@@ -364,11 +473,11 @@ async function runTaxLookup() {
                 }
              }
              
-             setStatus(`Success! Applied Tax Code: ${targetCode}`, "success");
-             ZFAPPS.invoke('SHOW_MESSAGE', { type: 'success', content: `Tax updated to ${targetCode} for ${updatedCount} items` });
+             setStatus(`Success! Applied Tax: ${appliedTaxName}`, "success");
+             ZFAPPS.invoke('SHOW_MESSAGE', { type: 'success', content: `Tax updated to ${appliedTaxName} for ${updatedCount} items` });
 
         } else {
-             throw new Error(`Tax Code '${targetCode}' not found in Zoho Books settings.`);
+             throw new Error(`Could not resolve Tax ID.`);
         }
 
     } catch (e) {
@@ -381,81 +490,212 @@ async function runTaxLookup() {
     }
 }
 
-async function findTaxIdByCode(targetCode) {
-    if (!zApp || !organizationID) {
-        log("Cannot search taxes: Missing App or OrgID");
-        return null;
-    }
-
+/* -------------------------------------------------------------------------
+   TAX CREATION & MANAGEMENT HELPERS
+   ------------------------------------------------------------------------- */
+   
+async function fetchAllTaxes() {
+    if (!organizationID) return [];
+    
+    let allTaxes = [];
     let stopPaging = false;
+    
+    // We'll search up to 30 pages
     for (let pageNum = 1; pageNum <= 30; pageNum++) {
         if (stopPaging) break;
         
-        log(`Searching Taxes Page ${pageNum}...`);
-        
-        let taxesList = [];
-        let hasMore = false
-
-        try {
-            // Using ZFAPPS.request (SDK v2) to call the connection
-    
-
-    
-
         let options = {
-            api_configuration_key :'ac__com_yabd6a_zohobook_taxes',
-            url_param: {orgID: organizationID,pageIndex: pageNum}, // If your API Config expects URL params
-
+            api_configuration_key: 'ac__com_yabd6a_zohobook_taxes',
+            url_param: { orgID: organizationID, pageIndex: pageNum }
         };
-            const response =  await  ZFAPPS.request(options)
-
+        
+        try {
+            const response = await ZFAPPS.request(options);
             // ZFAPPS.request returns { data: ..., status: ... } or the body directly
-            let body = response.data ;
-             if(response.code !== 0 && response.code !== "0") {
-                log(`API Error: ${body.message}`);
-                break;
+            let body = response.data || response.body; 
+            console.log(`Fetched taxes page ${pageNum}: `, body.body);
+            
+            if (typeof body.body === 'string') {
+                 try { body = JSON.parse(body.body); } catch(e) {}
             }
-            if (typeof body.body=== 'string') {
-                 try { body = JSON.parse(body.body); } catch(e) {       console.error(e);break;}
-            }
-            // Check for API errors in body
-            if(body.code !== 0 && body.code !== "0") {
-                log(`API Error: ${body.message}`);
+            
+            if (body.code === 0 || body.code === "0") {
+                const pageTaxes = body.taxes || [];
+                allTaxes = allTaxes.concat(pageTaxes);
+                
+                if (body.page_context) {
+                   if (!body.page_context.has_more_page) stopPaging = true;
+                } else {
+                   stopPaging = true; // No context usually means single page or error
+                }
             } else {
-                 taxesList = body.taxes || [];
-                 if (body.page_context) {
-                     hasMore = body.page_context.has_more_page;
-                 }
+                log(`Error fetching taxes page ${pageNum}: ${body.message}`);
+                break; 
             }
-
-        } catch (err) {
-            console.error(err);
-            // In a real scenario we might re-throw, but here we break.
+        } catch (e) {
+            console.error("Error fetching taxes page " + pageNum, e);
             break;
         }
-
-        // Loop taxes in this page
-        for (let tax of taxesList) {
-            const taxName = tax.tax_name; // e.g., "Tax Name, Code"
-            if (taxName && taxName.includes(",")) {
-                const parts = taxName.split(",");
-                if (parts.length >= 2) {
-                    const existingCode = parts[1].trim(); 
-                    if (existingCode.includes(targetCode)) { // Deluge was doing `contains`
-                         log(`MATCH FOUND! Name: ${taxName} | ID: ${tax.tax_id}`);
-                         return tax.tax_id;
-                    }
-                }
-            }
-        }
-
-        if (!hasMore) {
-            stopPaging = true;
-        }
     }
+    return allTaxes;
+}
 
+async function findTaxAuthorityByName(authName) {
+    if (!authName) return null;
+    log(`Searching for Tax Authority: ${authName}`);
+
+    // Since there's no pagination requirement mentioned extensively for authorities or we assume fewer authorities,
+    // we can try fetching. However, list APIs are usually paginated.
+    // Assuming 'ac__com_yabd6a_zohobook_tax_authorities' lists them.
+    
+    let options = {
+        api_configuration_key: 'ac__com_yabd6a_zohobook_tax_authorities',
+        url_param: { orgID: organizationID }
+    };
+    
+    try {
+        const response = await ZFAPPS.request(options);
+        let body = response.data || response.body;
+        if (typeof body === 'string') try { body = JSON.parse(body); } catch(e) {}
+        
+        if (body.code === 0 || body.code === "0") {
+            const authorities = body.tax_authorities || [];
+            // Basic search
+            const found = authorities.find(a => a.tax_authority_name.toLowerCase() === authName.toLowerCase());
+            if (found) return found;
+        }
+    } catch (e) {
+        log(`Error fetching tax authorities: ${e.message}`);
+    }
     return null;
 }
+
+async function createTaxAuthority(authName) {
+    log(`Creating Tax Authority: ${authName}`);
+    
+    const payload = {
+        "tax_authority_name": authName,
+        "description": "Created by Extension",
+        "organization_id": organizationID
+    };
+
+    const options = {
+        api_configuration_key: 'ac__com_yabd6a_zohobook_tax_authorities_po',
+        url_param: { orgID: organizationID },
+        body: {
+            mode: 'raw',
+            raw: JSON.stringify(payload)
+        }
+    };
+    
+    try {
+        const response = await ZFAPPS.request(options);
+        let body = response.data || response.body;
+        if(typeof body === 'string') try { body = JSON.parse(body); } catch(e){}
+        
+        if((body.code === 0 || body.code === "0") && body.tax_authority) {
+            return body.tax_authority;
+        } else {
+            throw new Error(body.message || "Unknown error creating tax authority");
+        }
+    } catch (e) {
+        log(`API Create Authority Error: ${e.message}`);
+        throw e;
+    }
+}
+
+async function createTaxComponent(name, rateRaw, authorityId, authorityName) {
+    // Rate raw is like 0.0625 -> 6.25
+    const ratePercentage = parseFloat(rateRaw) * 100;
+    
+    log(`Creating Tax Component: ${name} (${ratePercentage}%) [Auth: ${authorityName}]`);
+    
+    const payload = {
+        "tax_name": name,
+        "tax_percentage": ratePercentage,
+        "tax_type": "tax",
+        "organization_id": organizationID
+    };
+    
+    // Add authority if provided
+    if (authorityId) {
+        payload.tax_authority_id = authorityId;
+        payload.tax_authority_name = authorityName;
+    }
+    
+    // Using provided API Config for Tax Creation
+    const options = {
+        api_configuration_key: 'ac__com_yabd6a_zohobook_taxes_post',
+        url_param: { orgID: organizationID },
+        body: {
+            mode: 'raw',
+            raw: JSON.stringify(payload)
+        }
+    };
+    
+    try {
+        const response = await ZFAPPS.request(options);
+        let body = response.data || response.body;
+        if(typeof body === 'string') try { body = JSON.parse(body); } catch(e){}
+        
+        if((body.code === 0 || body.code === "0") && body.tax) {
+            return body.tax.tax_id;
+        } else {
+            throw new Error(body.message || "Unknown error creating tax");
+        }
+    } catch (e) {
+        log(`API Create Tax Error: ${e.message}`);
+        throw e;
+    }
+}
+
+async function createTaxGroup(name, taxIds) {
+    log(`Creating Tax Group: ${name} with IDs: ${taxIds.join(', ')}`);
+    
+    const payload = {
+        "tax_group_name": name, // API doc says 'tax_group_name' for groups usually, checking context... 
+        // Docs provided say: 'tax_group_name' for Create a tax group.
+        // Wait, standard Create Tax endpoint supports 'tax_type': 'compound_tax' or similar?
+        // Ah, the user provided a specific connection for 'create tax group' and screenshot says 'Create a tax group'.
+        // It uses 'tax_group_name' and 'taxes' (list of IDs string).
+        
+        "taxes": taxIds, // Screenshot says "taxes": "98200...", array or CSV?
+        // Screenshot example: "taxes": "982000000566009" (string)
+        // Description says "Comma Separated list of tax IDs"
+        "organization_id": organizationID
+    };
+    
+    // Use the CSV string if screenshot implies simple string for single ID, but usually for group it's multiple.
+    // Argument 'taxes' description: "Comma Seperated list of tax IDs".
+    payload.taxes = taxIds.join(',');
+
+    const options = {
+        api_configuration_key: 'ac__com_yabd6a_zohobook_tax_group',
+        url_param: { orgID: organizationID },
+        body: {
+            mode: 'raw',
+            raw: JSON.stringify(payload)
+        }
+    };
+    
+    try {
+        const response = await ZFAPPS.request(options);
+        let body = response.data || response.body;
+        if(typeof body === 'string') try { body = JSON.parse(body); } catch(e){}
+        
+        if((body.code === 0 || body.code === "0") && body.tax_group) {
+             return body.tax_group.tax_group_id; 
+        } else {
+             // Fallback: sometimes it returns 'tax' object?
+             if(body.tax && body.tax.tax_id) return body.tax.tax_id;
+             throw new Error(body.message || "Unknown error creating tax group");
+        }
+    } catch (e) {
+        log(`API Create Tax Group Error: ${e.message}`);
+        throw e;
+    }
+}
+
 
 /* -------------------------------------------------------------------------
    POLLING & DEBOUNCE LOGIC
