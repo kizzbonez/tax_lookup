@@ -4,6 +4,7 @@ let organizationID = null;
 let invoiceID = null;
 let lastInvoiceDataStr = ""; // For change detection
 let expectedTaxId = null; // Stores the tax ID we determined should apply
+let lastCustomerId = null; // Track customer changes to trigger address copy
 
 // Standard Debounce Function
 function debounce(func, wait) {
@@ -110,6 +111,79 @@ async function runTaxLookup() {
         if(!organizationID) {
             organizationID = invoiceDetails.organization_id; 
         }
+
+        // --- NEW: Address Autofill Logic ---
+        // If Customer Changed OR (Destination Zip is empty AND we have shipping address), autoset.
+        // We use shipping address by default, fallback to billing? Usually shipping matters for tax.
+        
+        let didUpdateAddress = false;
+        const currentCustId = invoiceDetails.customer_id;
+        
+        // Condition: Customer ID Changed from last run (and not initial null run if desired? No, even initial might need fill)
+        // OR Fields are empty.
+        // 'lastCustomerId' tracks the ID from the LAST SUCCESSFUL RUN.
+        // If this is the FIRST run (lastCustomerId is null), we populate if fields are empty.
+        // If this is a CHANGE run (lastCustomerId != current), we overwrite fields even if filled?
+        // User asked: "when the user select customer... put it to destination fields".
+        // This implies overwrite on selection.
+        
+        const sourceAddress = invoiceDetails.shipping_address || invoiceDetails.billing_address;
+        
+        if (sourceAddress && currentCustId && (currentCustId !== lastCustomerId)) {
+             log("Customer Change Detected: Attempting Address Autofill...");
+             
+             // Helper maps needed for finding index
+             const findIndex = (searchKey) => {
+                 if (!invoiceDetails.custom_fields) return -1;
+                 const normalized = searchKey.toLowerCase().replace(/ /g, '_');
+                 for (let i=0; i < invoiceDetails.custom_fields.length; i++) {
+                     const cf = invoiceDetails.custom_fields[i];
+                     const label = (cf.label || cf.placeholder || cf.api_name || "").trim().toLowerCase();
+                     const apiName = (cf.api_name || "").toLowerCase();
+                     if (label === normalized || label.includes(normalized) || apiName.includes(normalized)) {
+                         return i;
+                     }
+                 }
+                 return -1;
+             };
+             
+             const idxAddr = findIndex("Destination Address");
+             const idxCity = findIndex("Destination City");
+             const idxState = findIndex("Destination State");
+             const idxZip = findIndex("Destination Zip");
+             
+             // Prepare updates
+             // Note: sourceAddress keys are usually lowercase in API (address, city, state, zip/zipcode)
+             // Check keys carefully or check values
+             const addrVal = sourceAddress.address || sourceAddress.street || "";
+             const cityVal = sourceAddress.city || "";
+             const stateVal = sourceAddress.state || "";
+             const zipVal = sourceAddress.zip || sourceAddress.zipcode || "";
+             
+             const updates = [];
+             if (idxAddr >= 0) updates.push({ i: idxAddr, v: addrVal });
+             if (idxCity >= 0) updates.push({ i: idxCity, v: cityVal });
+             if (idxState >= 0) updates.push({ i: idxState, v: stateVal });
+             if (idxZip >= 0) updates.push({ i: idxZip, v: zipVal });
+             
+             if (updates.length > 0) {
+                 log(`Autofilling ${updates.length} destination fields from Customer Address...`);
+                 
+                 // Apply updates
+                 for (const u of updates) {
+                     await ZFAPPS.set(`invoice.custom_fields.${u.i}.value`, u.v);
+                     // Update invoiceDetails locally so subsequent logic uses new values
+                     if(invoiceDetails.custom_fields[u.i]) {
+                         invoiceDetails.custom_fields[u.i].value = u.v;
+                     }
+                 }
+                 didUpdateAddress = true;
+                 setStatus("Autofilled Destination from Customer.", "success");
+             }
+        }
+        
+        // Update tracker
+        if(currentCustId) lastCustomerId = currentCustId;
 
         // 2. EXTRACT CUSTOM FIELDS & STANDARD FIELDS
         const customFieldMap = {};
