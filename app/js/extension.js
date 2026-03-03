@@ -190,9 +190,6 @@ async function runTaxLookup() {
         if (invoiceDetails.custom_fields && invoiceDetails.custom_fields.length > 0) {
             log(`Found ${invoiceDetails.custom_fields.length} Custom Fields`);
             
-            // DEBUG: Log the first field structure to help debug
-            console.log("First CF Structure:", JSON.stringify(invoiceDetails.custom_fields[0]));
-
             invoiceDetails.custom_fields.forEach(cf => {
                 // Try label, then placeholder, then api_name
                 // Trim logic to ensure safe matching
@@ -213,9 +210,6 @@ async function runTaxLookup() {
         } else {
              log("No Custom Fields found in Invoice Data");
         }
-        
-        // Debug available keys
-        console.log("Available CF Keys: ", Object.keys(customFieldMap));
         
         // Helper to find value by variations (Label, Placeholder, API Name, Fuzzy Match)
         const getValue = (searchKey) => {
@@ -337,7 +331,7 @@ async function runTaxLookup() {
         const allTaxes = await fetchAllTaxes();
         let finalTaxId = null;
         let appliedTaxName = "";
-        console.log("All Taxes Fetched: ", allTaxes);
+
         if (useCodeLookup) {
              log(`Processing as CA/Code-based Tax lookup (Code: ${targetCode})`);
              // CA/Legacy Logic: Find matching code in tax name
@@ -421,6 +415,7 @@ async function runTaxLookup() {
                       
                       // Check existence
                       const existingTax = allTaxes.find(t => t.tax_name === taxName);
+
                       if (existingTax) {
                           log(`Using existing component: ${taxName}`);
                           componentIds.push(existingTax.tax_id);
@@ -513,7 +508,6 @@ async function fetchAllTaxes() {
             const response = await ZFAPPS.request(options);
             // ZFAPPS.request returns { data: ..., status: ... } or the body directly
             let body = response.data || response.body; 
-            console.log(`Fetched taxes page ${pageNum}: `, body.body);
             
             if (typeof body.body === 'string') {
                  try { body = JSON.parse(body.body); } catch(e) {}
@@ -556,7 +550,7 @@ async function findTaxAuthorityByName(authName) {
     try {
         const response = await ZFAPPS.request(options);
         let body = response.data || response.body;
-        if (typeof body === 'string') try { body = JSON.parse(body); } catch(e) {}
+        if (typeof body.body === 'string') try { body = JSON.parse(body.body); } catch(e) {}
         
         if (body.code === 0 || body.code === "0") {
             const authorities = body.tax_authorities || [];
@@ -591,10 +585,10 @@ async function createTaxAuthority(authName) {
     try {
         const response = await ZFAPPS.request(options);
         let body = response.data || response.body;
-        if(typeof body === 'string') try { body = JSON.parse(body); } catch(e){}
+        if(typeof body.body === 'string') try { body = JSON.parse(body.body); } catch(e){}
         
-        if((body.code === 0 || body.code === "0") && body.tax_authority) {
-            return body.tax_authority;
+        if((body.code === 0 || body.code === "0") && body.tax_authority_name) {
+            return body.tax_authority_name;
         } else {
             throw new Error(body.message || "Unknown error creating tax authority");
         }
@@ -636,7 +630,8 @@ async function createTaxComponent(name, rateRaw, authorityId, authorityName) {
     try {
         const response = await ZFAPPS.request(options);
         let body = response.data || response.body;
-        if(typeof body === 'string') try { body = JSON.parse(body); } catch(e){}
+
+        if(typeof body.body === 'string') try { body = JSON.parse(body.body); } catch(e){}
         
         if((body.code === 0 || body.code === "0") && body.tax) {
             return body.tax.tax_id;
@@ -681,7 +676,7 @@ async function createTaxGroup(name, taxIds) {
     try {
         const response = await ZFAPPS.request(options);
         let body = response.data || response.body;
-        if(typeof body === 'string') try { body = JSON.parse(body); } catch(e){}
+        if(typeof body.body === 'string') try { body = JSON.parse(body.body); } catch(e){}
         
         if((body.code === 0 || body.code === "0") && body.tax_group) {
              return body.tax_group.tax_group_id; 
