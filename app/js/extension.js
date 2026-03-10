@@ -265,6 +265,7 @@ async function runTaxLookup() {
                  
                  // Apply updates
                  for (const u of updates) {
+                    
                      await ZFAPPS.set(`invoice.custom_fields.${u.i}.value`, u.v);
                      // Update invoiceDetails locally so subsequent logic uses new values
                      if(invoiceDetails.custom_fields[u.i]) {
@@ -408,6 +409,60 @@ async function runTaxLookup() {
             }
             
             if(!responseBody) throw new Error("Unexpected response format from Webhook. Missing 'body' field.");
+            
+            // --- SAVE API RESPONSE TO CUSTOM FIELD ---
+            try {
+                // Find target field index
+                let responseFieldIndex = -1;
+                const targetApiName = 'cf__com_yabd6a_api_response';
+                
+                if (invoiceDetails.custom_fields) {
+                    log("Searching for response field: " + targetApiName);
+                    for (let i = 0; i < invoiceDetails.custom_fields.length; i++) {
+                        const cf = invoiceDetails.custom_fields[i];
+                        // Match api_name OR placeholder (sometimes api_name is hidden in placeholder)
+                        const cfApi = cf.api_name || "";
+                        const cfPlaceholder = cf.placeholder || "";
+                        const cfLabel = cf.label || "";
+                        
+                        if (cfApi === targetApiName || cfPlaceholder === targetApiName || cfLabel === targetApiName) {
+                            responseFieldIndex = i;
+                            log(`Found field match at index ${i} (Label: ${cfLabel})`);
+                            break;
+                        }
+                    }
+                }
+
+                if (responseFieldIndex >= 0) {
+                    // Update field with raw body content
+                    let rawContent = "";
+                    if (responseBody && responseBody.body) {
+                        rawContent = typeof responseBody.body === 'string' ? responseBody.body : JSON.stringify(responseBody.body);
+                    } else {
+                        // Fallback if body is structured differently
+                        rawContent = JSON.stringify(responseBody);
+                    }
+                    
+                    log("Saving API Response value...");
+                     console.log("Updating field index:", responseFieldIndex, "with value:", u.v);
+                    await ZFAPPS.set(`invoice.custom_fields.${responseFieldIndex}.value`, rawContent);
+                    // Update local object to reflect change
+                    if(invoiceDetails.custom_fields[responseFieldIndex]) {
+                        invoiceDetails.custom_fields[responseFieldIndex].value = rawContent;
+                    }
+                } else {
+                    log("Warning: Custom Field 'cf__com_yabd6a_api_response' not found in invoice details.");
+                    // Log available fields for debugging
+                    if(invoiceDetails.custom_fields) {
+                         const av = invoiceDetails.custom_fields.map(c => c.api_name || c.placeholder || c.label).join(", ");
+                         log("Available API Names/Placeholders: " + av);
+                    }
+                }
+            } catch (saveErr) {
+                log("Error saving API response to field: " + saveErr.message);
+            }
+            // -----------------------------------------
+
             data = JSON.parse(responseBody.body)[0];
 
         } catch (connErr) {
@@ -823,6 +878,12 @@ function checkForChanges(currentInvoice) {
     // Clone and cleanup to avoid infinite loops and over-triggering
     const checkObj = { ...currentInvoice };
     // User requested: do not trigger on line item changes (prevents loops when tax updates)
+    // However, we DO want to trigger on line item COUNT changes (adding/removing items)
+    // So we manually store the length before deleting the full array.
+    if (currentInvoice.line_items) {
+        checkObj._lineItemCount = currentInvoice.line_items.length;
+    }
+
     delete checkObj.line_items; 
     
     // Also ignore calculated totals that might change when we apply tax
