@@ -488,6 +488,7 @@ async function runTaxLookup() {
         const allTaxes = await fetchAllTaxes();
         let finalTaxId = null;
         let appliedTaxName = "";
+        let appliedTaxPercentage = 0; // New variable to track percentage
 
         if (useCodeLookup) {
              log(`Processing as CA/Code-based Tax lookup (Code: ${targetCode})`);
@@ -501,6 +502,7 @@ async function runTaxLookup() {
                              log(`MATCH FOUND! Name: ${t.tax_name} | ID: ${t.tax_id}`);
                              finalTaxId = t.tax_id;
                              appliedTaxName = t.tax_name;
+                             appliedTaxPercentage = t.tax_percentage; // Capture existing percentage
                              break;
                         }
                     }
@@ -521,12 +523,14 @@ async function runTaxLookup() {
              // Group Name: <STATE>_<JURISDICTION>_<TOTAL_RATE>
              const groupName = `${state}_${jurisdiction}_${totalRate}`;
              appliedTaxName = groupName;
+             appliedTaxPercentage = parseFloat(totalRate) * 100; // Calculate percentage from rate (0.089 -> 8.9)
 
              // Check if Group Exists
              const existingGroup = allTaxes.find(t => t.tax_name === groupName);
 
              if (existingGroup) {
                   finalTaxId = existingGroup.tax_id;
+                  appliedTaxPercentage = existingGroup.tax_percentage; // Use system percentage if available
                   log(`Found existing Tax Group: ${groupName} (${finalTaxId})`);
              } else {
                   log(`Tax Group '${groupName}' not found. Creating components...`);
@@ -559,10 +563,11 @@ async function runTaxLookup() {
                   // 2. Component Logic
                   const components = [];
                   // We use raw rates (0.0625) for name and pass to creation (where it becomes percentage)
-                  if(data.state_rate > 0) components.push({ type: 'STATE_RATE', val: data.state_rate });
-                  if(data.county_rate > 0) components.push({ type: 'COUNTY_RATE', val: data.county_rate });
-                  if(data.city_rate > 0) components.push({ type: 'CITY_RATE', val: data.city_rate });
-                  if(data.special_rate > 0) components.push({ type: 'SPECIAL_RATE', val: data.special_rate });
+                  // Allow 0 rates as per user requirement, checking strictly for null/undefined
+                  if(data.state_rate != null && data.state_rate >= 0) components.push({ type: 'STATE_RATE', val: data.state_rate });
+                  if(data.county_rate != null && data.county_rate >= 0) components.push({ type: 'COUNTY_RATE', val: data.county_rate });
+                  if(data.city_rate != null && data.city_rate >= 0) components.push({ type: 'CITY_RATE', val: data.city_rate });
+                  if(data.special_rate != null && data.special_rate >= 0) components.push({ type: 'SPECIAL_RATE', val: data.special_rate });
                   
                   const componentIds = [];
                   
@@ -594,7 +599,7 @@ async function runTaxLookup() {
                           log(`Created new Tax Group: ${groupName} (${finalTaxId})`);
                       }
                   } else {
-                      log("No positive tax components found. Cannot create group.");
+                      log("No valid tax components found. Cannot create group.");
                   }
              }
         }
@@ -612,6 +617,9 @@ async function runTaxLookup() {
                      try {
                          const item = { ...invoiceDetails.line_items[i] };
                          item.tax_id = finalTaxId;
+                         // Force the display name and percentage so the UI shows it even if not in the cached list
+                         item.tax_name = appliedTaxName;
+                         item.tax_percentage = appliedTaxPercentage;
                          
                          ZFAPPS.set(`invoice.line_items[${i}]`, item).then(() => {
                              log(`Updated item ${i} with tax_id ${finalTaxId}`);
