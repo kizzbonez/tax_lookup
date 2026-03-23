@@ -444,7 +444,6 @@ async function runTaxLookup() {
                     }
                     
                     log("Saving API Response value...");
-                     console.log("Updating field index:", responseFieldIndex, "with value:", u.v);
                     await ZFAPPS.set(`invoice.custom_fields.${responseFieldIndex}.value`, rawContent);
                     // Update local object to reflect change
                     if(invoiceDetails.custom_fields[responseFieldIndex]) {
@@ -615,13 +614,25 @@ async function runTaxLookup() {
              if (invoiceDetails.line_items && Array.isArray(invoiceDetails.line_items)) {
                 for (let i = 0; i < invoiceDetails.line_items.length; i++) {
                      try {
-                         const item = { ...invoiceDetails.line_items[i] };
-                         item.tax_id = finalTaxId;
-                         // Force the display name and percentage so the UI shows it even if not in the cached list
-                         item.tax_name = appliedTaxName;
-                         item.tax_percentage = appliedTaxPercentage;
+                  
+                         const item = invoiceDetails.line_items[i];
+                         // Check if item is already set to 'Non-Taxable' - do not override
+                         // Logic: If tax_name indicates Non-Taxable OR (exemption code is present AND tax_id is empty)
+                         const isExempt = (item.tax_exemption_code && item.tax_exemption_code !== "" && (!item.tax_id || item.tax_id === ""));
                          
-                         ZFAPPS.set(`invoice.line_items[${i}]`, item).then(() => {
+                         if (isExempt) {
+                             log(`Skipping item ${i} (Non-Taxable/Exempt)`);
+                             continue;
+                         }
+
+                         // Clone item for modification
+                         const newItem = { ...item };
+                         newItem.tax_id = finalTaxId;
+                         // Force the display name and percentage so the UI shows it even if not in the cached list
+                         newItem.tax_name = appliedTaxName;
+                         newItem.tax_percentage = appliedTaxPercentage;
+                  
+                         ZFAPPS.set(`invoice.line_items[${i}]`, newItem).then(() => {
                              log(`Updated item ${i} with tax_id ${finalTaxId}`);
                          }).catch(err => {
                              log(`Failed to update item ${i}: ${err.message}`);
@@ -931,6 +942,14 @@ function checkTaxConsistency(invoice) {
         const currentTaxId = item.tax_id ? String(item.tax_id) : "";
         const expectedStr = String(expectedTaxId);
         
+        // If currently marked as Non-Taxable, don't consider it a conflict
+        const isNonTaxable = (item.tax_name === "Non-Taxable" || item.tax_name === "Non Taxable");
+        const isExempt = (item.tax_exemption_code && item.tax_exemption_code !== "" && (!item.tax_id || item.tax_id === ""));
+        
+        if (isNonTaxable || isExempt) {
+            continue;
+        }
+
         if (currentTaxId !== expectedStr) {
             conflictFound = true;
             break;
