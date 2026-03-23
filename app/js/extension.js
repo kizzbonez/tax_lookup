@@ -52,6 +52,11 @@ window.onload = function () {
             // Set initial state for polling
             if (res && res.invoice) {
                 lastInvoiceDataStr = JSON.stringify(res.invoice);
+                // Initialize lastCustomerId so we don't trigger a "new customer" change on first edit run
+                if (res.invoice.customer_id) {
+                    lastCustomerId = res.invoice.customer_id;
+                    log(`Initialized Last Customer ID: ${lastCustomerId}`);
+                }
                 initPolling();
             }
 
@@ -246,10 +251,28 @@ async function runTaxLookup() {
              }
 
              const updates = [];
-             if (idxAddr >= 0) updates.push({ i: idxAddr, v: addrVal });
-             if (idxCity >= 0) updates.push({ i: idxCity, v: cityVal });
-             if (idxState >= 0) updates.push({ i: idxState, v: stateVal });
-             if (idxZip >= 0) updates.push({ i: idxZip, v: zipVal });
+             
+             // Helper: Check if field already has a value in UI to avoid overwriting with empty
+             const hasExistingValue = (idx) => {
+                 if (idx >= 0 && invoiceDetails.custom_fields && invoiceDetails.custom_fields[idx]) {
+                     const val = invoiceDetails.custom_fields[idx].value;
+                     return (val && val.trim() !== "");
+                 }
+                 return false;
+             };
+
+             // Only add update if:
+             // 1. The new value is NOT empty (overwrite allowed if source is valid)
+             // 2. OR The existing field is empty (populate empty fields allowed, even if source is empty? No, pointless)
+             // 3. User requested: "if the fields has already have value do not empty it"
+             // Refined Logic:
+             // - If Source is Empty: Do NOT update (prevent emptying).
+             // - If Source has Value: overwrite existing (standard autofill behavior).
+             
+             if (idxAddr >= 0 && addrVal && addrVal.trim() !== "") updates.push({ i: idxAddr, v: addrVal });
+             if (idxCity >= 0 && cityVal && cityVal.trim() !== "") updates.push({ i: idxCity, v: cityVal });
+             if (idxState >= 0 && stateVal && stateVal.trim() !== "") updates.push({ i: idxState, v: stateVal });
+             if (idxZip >= 0 && zipVal && zipVal.trim() !== "") updates.push({ i: idxZip, v: zipVal });
              
              // If we want to support country, we need to find its index too.
              // But user didn't explicitly ask to map country to a field, just mentioned country is full name.
@@ -258,7 +281,7 @@ async function runTaxLookup() {
              // Also look for Country field
              const idxCountry = findIndex("Destination Country");
              
-             if (idxCountry >= 0) updates.push({ i: idxCountry, v: countryVal });
+             if (idxCountry >= 0 && countryVal && countryVal.trim() !== "") updates.push({ i: idxCountry, v: countryVal });
              
              if (updates.length > 0) {
                  log(`Autofilling ${updates.length} destination fields from Customer Address...`);
