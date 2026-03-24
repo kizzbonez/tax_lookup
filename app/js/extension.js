@@ -641,22 +641,48 @@ async function runTaxLookup() {
                          const item = invoiceDetails.line_items[i];
                          // Check if item is already set to 'Non-Taxable' - do not override
                          // Logic: If tax_name indicates Non-Taxable OR (exemption code is present AND tax_id is empty)
+                       
                          const isExempt = (item.tax_exemption_code && item.tax_exemption_code !== "" && (!item.tax_id || item.tax_id === ""));
                          
-                         if (isExempt) {
+                         if ( isExempt) {
                              log(`Skipping item ${i} (Non-Taxable/Exempt)`);
                              continue;
                          }
 
                          // Clone item for modification
                          const newItem = { ...item };
-                         newItem.tax_id = finalTaxId;
-                         // Force the display name and percentage so the UI shows it even if not in the cached list
-                         newItem.tax_name = appliedTaxName;
-                         newItem.tax_percentage = appliedTaxPercentage;
+                         const itemName = (newItem.name || "").toLowerCase();
+                         let applyTaxToItem = true;
+
+                         // Rule: Delivery (Rental)
+                         if (itemName.includes("delivery (rental)")) {
+                             if (state === "CA") {
+                                 applyTaxToItem = false;
+                                 log(`Item '${newItem.name}' is Delivery (Rental) in CA -> Setting Non-Taxable`);
+                             }
+                         }
+                         // Rule: Repair Labor
+                         else if (itemName.includes("repair labor")) {
+                              if (state === "CA") {
+                                 applyTaxToItem = false;
+                                 log(`Item '${newItem.name}' is Repair Labor in CA -> Setting Non-Taxable`);
+                              }
+                         }
+
+                         if (applyTaxToItem) {
+                             newItem.tax_id = finalTaxId;
+                             newItem.tax_name = appliedTaxName;
+                             newItem.tax_percentage = appliedTaxPercentage;   
+                         } else {
+                             // Force Non-Taxable
+                             newItem.tax_id = ""; 
+                             newItem.tax_exemption_code = "Non-Taxable Service"; // Optional: Set an exemption code to indicate reason
+                             newItem.tax_percentage = 0;
+                             
+                         }
                   
                          ZFAPPS.set(`invoice.line_items[${i}]`, newItem).then(() => {
-                             log(`Updated item ${i} with tax_id ${finalTaxId}`);
+                             log(`Updated item ${i}${applyTaxToItem ? ' ' : ' (Non-Taxable)'}`);
                          }).catch(err => {
                              log(`Failed to update item ${i}: ${err.message}`);
                          });
